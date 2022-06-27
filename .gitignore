@@ -3,7 +3,6 @@
 X-Gear/output/
 X-Gear/cache/
 __pycache__/
-document_generation/
 generated/
 intermediate_dev_results_template_aw.json
 processed_data/

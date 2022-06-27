@@ -1,0 +1,16 @@
+CUDA_VISIBLE_DEVICES='1' python train.py\
+    --model_name gpt2\
+    --train_path ../processed_data/toddata_all_sep_template/train_aw_temp.txt\
+    --dev_path ../processed_data/toddata_all_sep_template/dev_aw_temp.txt\
+    --test_path ../processed_data/toddata_all_sep_template/test_aw_temp.txt\
+    --margin 0\
+    --max_len 512\
+    --number_of_gpu 1\
+    --batch_size_per_gpu 8\
+    --gradient_accumulation_steps 16\
+    --effective_batch_size 128\
+    --total_steps 10000\
+    --print_every 20\
+    --save_every 200\
+    --learning_rate 2e-5\
+    --save_path_prefix ../trained_model/ace_all_simctg_margin0_pad_eval_sep_template_aw/ \
