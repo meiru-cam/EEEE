@@ -925,6 +925,7 @@ elif args.type == "ranktrig":
                     gold_trig_event.append(g_text[16:])
                     # ref_event: ground truth
                     ref_event.append(g_text)
+                    p_texts = [(x, compute_bleu(x, g_text)) for x in p_texts]
                     candidates.append(p_texts)
 
                     # cur_candidates = []

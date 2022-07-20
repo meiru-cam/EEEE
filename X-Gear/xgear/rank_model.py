@@ -6,7 +6,6 @@ import os
 # DBS: num_return_sequences=16, num_beam_groups=16, diversity_penalty=1.0, num_beams=16
 # Transformers 4.1.1 and PyTorch 1.4
 
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
 def RankingLoss(score, summary_score=None, margin=0, gold_margin=0, gold_weight=1, no_gold=False, no_cand=False):
     ones = torch.ones_like(score)
     loss_func = torch.nn.MarginRankingLoss(0.0)

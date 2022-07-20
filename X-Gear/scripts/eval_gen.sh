@@ -10,7 +10,7 @@ MODEL="./output/ace05_mT5base_mT5_trig_arg_notemp_notype/20220621_141357/best_mo
 # MODEL="./output/ace05_mT5base_mT5_e2e_et_trig_arg_notemp_notype/20220712_225238/best_model.mdl"
 # MODEL="./output/ace05_mT5base_mT5_e2e_et_trig_et_arg_notemp/20220713_120940/best_model.mdl"
 # OUTPUT_DIR="./ace05rank/diverse10-single_bleu/"
-OUTPUT_DIR="./ace05rank/test/"
+OUTPUT_DIR="./ace05rank/diverse10-single-trig_bleu/"
 
 # CONFIG_EN="./config/config_T5-base_en.json"
 CONFIG_EN="./config/config_ace05_mT5copy-base_en2.json"

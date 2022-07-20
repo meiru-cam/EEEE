@@ -24,13 +24,15 @@ from rank_model import RankingLoss
 import math
 import logging
 import re
+from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.bleu_score import SmoothingFunction
+
 logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 logging.getLogger("transformers.tokenization_utils_fast").setLevel(logging.ERROR)
 
-
 def base_setting(args):
-    args.report_freq = getattr(args, "report_freq", 10)
+    args.report_freq = getattr(args, "report_freq", 20)
     args.margin = getattr(args, "margin", 0.01)
     args.gold_margin = getattr(args, "gold_margin", 0)
     args.model_type = getattr(args, "model_type", 'roberta-base')
@@ -47,6 +49,10 @@ def base_setting(args):
     args.cand_weight = getattr(args, "cand_weight", 1)
     args.gold_weight = getattr(args, "gold_weight", 1)
 
+def compute_bleu(can, ref):
+    smoothie = SmoothingFunction().method2
+    bleu_s = sentence_bleu([ref.split()], can.split(), weights=(1,0,0,0), smoothing_function=smoothie)
+    return bleu_s
 
 def evaluation(args):
     # load data
@@ -74,7 +80,7 @@ def evaluation(args):
     # mkdir("./result/%s/candidate"%model_name)
     mkdir("./result/%s/pred"%model_name)
     rouge_scorer = RougeScorer(['rouge1', 'rouge2', 'rougeLsum'], use_stemmer=True)
-    rouge1, rouge2, rougeLsum = 0, 0, 0
+    rouge1, rouge2, rougeLsum, bleu_score = 0, 0, 0, 0
     cnt = 0
     acc = 0
     scores = []
@@ -97,10 +103,11 @@ def evaluation(args):
             for j in range(similarity.shape[0]):
                 sample = samples[j]
                 sents = sample["candidates"][max_ids[j]][0]
-                score = rouge_scorer.score("\n".join(sample["abstract"]), "\n".join(sents))
+                score = rouge_scorer.score(sample["abstract"], sents)
                 rouge1 += score["rouge1"].fmeasure
                 rouge2 += score["rouge2"].fmeasure
                 rougeLsum += score["rougeLsum"].fmeasure
+                bleu_score += compute_bleu(sents, sample["abstract"])
                 p_texts.append(sents)
                 g_texts.append(sample["abstract"])
                 with open("./result/%s/pred/%d"%(model_name, cnt), "w") as f:
@@ -112,9 +119,10 @@ def evaluation(args):
     rouge1 = rouge1 / cnt
     rouge2 = rouge2 / cnt
     rougeLsum = rougeLsum / cnt
+    bleu_score = bleu_score/cnt
     print(f"accuracy: {acc / cnt}")
     cal_f1(p_texts, g_texts)
-    print("rouge1: %.6f, rouge2: %.6f, rougeL: %.6f"%(rouge1, rouge2, rougeLsum))
+    print("rouge1: %.6f, rouge2: %.6f, rougeL: %.6f, bleu: %.6f", (rouge1, rouge2, rougeLsum, bleu_score))
 
 def cal_f1(p_texts, g_texts):
     tp_trig, num_p_trig, num_g_trig = 0, 0, 0
@@ -171,7 +179,7 @@ def test(dataloader, scorer, args, gpuid):
     loss = 0
     cnt = 0
     rouge_scorer = RougeScorer(['rouge1', 'rouge2', 'rougeLsum'], use_stemmer=True)
-    rouge1, rouge2, rougeLsum = 0, 0, 0
+    rouge1, rouge2, rougeLsum, bleu_score = 0, 0, 0, 0
     with torch.no_grad():
         for (i, batch) in enumerate(dataloader):
             if args.cuda:
@@ -187,16 +195,18 @@ def test(dataloader, scorer, args, gpuid):
                 cnt += 1
                 sample = samples[j]
                 sents = sample["candidates"][max_ids[j]][0]
-                score = rouge_scorer.score("\n".join(sample["abstract"]), "\n".join(sents))
+                score = rouge_scorer.score(sample["abstract"], sents)
+                bleu_score += compute_bleu(sents, sample["abstract"])
                 rouge1 += score["rouge1"].fmeasure
                 rouge2 += score["rouge2"].fmeasure
                 rougeLsum += score["rougeLsum"].fmeasure
     rouge1 = rouge1 / cnt
     rouge2 = rouge2 / cnt
     rougeLsum = rougeLsum / cnt
+    bleu_score = bleu_score / cnt
     scorer.train()
     loss = 1 - ((rouge1 + rouge2 + rougeLsum) / 3)
-    print(f"rouge-1: {rouge1}, rouge-2: {rouge2}, rouge-L: {rougeLsum}")
+    print(f"rouge-1: {rouge1}, rouge-2: {rouge2}, rouge-L: {rougeLsum}, bleu_score: {bleu_score}")
     
     if len(args.gpuid) > 1:
         loss = torch.FloatTensor([loss]).to(gpuid)
@@ -216,7 +226,8 @@ def run(rank, args):
     is_mp = len(args.gpuid) > 1
     world_size = len(args.gpuid)
     if is_master:
-        id = len(os.listdir("./cache_eval"))
+        # id = len(os.listdir("./cache_eval"))
+        id = time.strftime('%Y%m%d_%H%M%S', time.localtime())
         recorder = Recorder(id, args.log)
     tok = RobertaTokenizer.from_pretrained(args.model_type)
     collate_fn = partial(collate_mp, pad_token_id=tok.pad_token_id, is_test=False)
@@ -252,13 +263,17 @@ def run(rank, args):
     minimum_loss = 100
     all_step_cnt = 0
     # start training
+    es_count = 0
     for epoch in range(args.epoch):
         print(f"------------- epoch {epoch}/{args.epoch} ----------------")
         s_optimizer.zero_grad()
         step_cnt = 0
         sim_step = 0
         avg_loss = 0
+        
         for (i, batch) in enumerate(dataloader):
+            if es_count == 10:
+                return
             if args.cuda:
                 to_cuda(batch, gpuid)
             step_cnt += 1
@@ -281,7 +296,7 @@ def run(rank, args):
                 s_optimizer.step()
                 s_optimizer.zero_grad()
             if sim_step % args.report_freq == 0 and step_cnt == 0 and is_master:
-                print("id: %d"%id)
+                # print("id: ", id)
                 print(f"similarity: {similarity[:, :10]}")
                 if not args.no_gold:
                     print(f"gold similarity: {gold_similarity}")
@@ -293,9 +308,11 @@ def run(rank, args):
                 avg_loss = 0
             del similarity, gold_similarity, loss
 
-            if all_step_cnt % 1 == 0 and all_step_cnt != 0 and step_cnt == 0:
+            if all_step_cnt % 40 == 0 and all_step_cnt != 0 and step_cnt == 0:
                 loss = test(val_dataloader, scorer, args, gpuid)
+                recorder.print("step: %d, test avg loss: %.6f"%(all_step_cnt, loss / args.report_freq))
                 if loss < minimum_loss and is_master:
+                    es_count = 0
                     minimum_loss = loss
                     if is_mp:
                         recorder.save(scorer.module, "scorer.bin")
@@ -303,8 +320,11 @@ def run(rank, args):
                         recorder.save(scorer, "scorer.bin")
                     recorder.save(s_optimizer, "optimizer.bin")
                     recorder.print("best - epoch: %d, batch: %d"%(epoch, i / args.accumulate_step))
+                else:
+                    es_count += 1
                 if is_master:
                     recorder.print("val rouge: %.6f"%(1 - loss))
+                
                
 
 def main(args):
@@ -334,7 +354,6 @@ if __name__ ==  "__main__":
 
     args = parser.parse_args()
     args.gpuid = [0]
-    os.environ["CUDA_AVAILABLE_DEVICES"] = "0"
     if args.cuda is False:
         if args.evaluate:
             evaluation(args)
@@ -346,13 +365,11 @@ if __name__ ==  "__main__":
         print("current device ", torch.cuda.current_device())
         if args.evaluate:
             # torch.cuda.set_device(args.gpuid[0])
-            with torch.cuda.device(0):
-
+            with torch.cuda.device(args.gpuid[0]):
                 evaluation(args)
         elif len(args.gpuid) == 1:    
-            with torch.cuda.device(0):
+            with torch.cuda.device(args.gpuid[0]):
                 print("-------------- current device ", torch.cuda.current_device())
-                a
                 main(args)
         else:
             main(args)

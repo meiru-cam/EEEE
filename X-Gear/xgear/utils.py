@@ -12,8 +12,8 @@ class Recorder():
     def __init__(self, id, log=True):
         self.log = log
         now = datetime.now()
-        date = now.strftime("%y-%m-%d")
-        self.dir = f"./cache_eval/{date}-{id}"
+        # date = now.strftime("%y-%m-%d")
+        self.dir = f"./cache_eval/{id}"
         if self.log:
             os.mkdir(self.dir)
             print("log file to ", self.dir)
