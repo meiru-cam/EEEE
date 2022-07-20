@@ -123,12 +123,12 @@ for batch in DataLoader(dev_set, batch_size=config.eval_batch_size, shuffle=Fals
             # eae_inputs.append(data[0].split('<|triggerword|>')[0]+'<|triggerword|> [None] <|template'+data[0].split('<|triggerword|>')[1].split('<|template')[1])
             # eae_inputs.append(data[0].split(' <|template')[0])
             # eae_inputs.append("TriggerExtract: " + data[0].split(' <|triggerword|>')[0])
-            eae_inputs.append("EventExtract: " + data[0])
+            eae_inputs.append("EventExtract: " + data[0].split(' <|template')[0] + " [" +data[4].replace(":", "_")+ "]")
             eae_gold_outputs.append(data[1])
             eae_events.append(data[2])
             eae_bids.append(i)
             # batch_inputs[i].append(data[0].split(' <|template')[0])
-            batch_inputs[i].append("EventExtract: " + data[0])
+            batch_inputs[i].append("EventExtract: " + data[0].split(' <|template')[0] + " [" +data[4].replace(":", "_")+ "]")
     
     # if there are triggers in this batch, predict argument roles
     if len(eae_inputs) > 0:
@@ -252,12 +252,12 @@ for batch in DataLoader(test_set, batch_size=config.eval_batch_size, shuffle=Fal
         for data in event_temp.get_training_data():
             # eae_inputs.append(data[0].split('<|triggerword|>')[0]+'<|triggerword|> [None] <|template'+data[0].split('<|triggerword|>')[1].split('<|template')[1])
             # eae_inputs.append(data[0].split(' <|template')[0])
-            eae_inputs.append("EventExtract: " + data[0])
+            eae_inputs.append("EventExtract: " + data[0].split(' <|template')[0] + " [" +data[4].replace(":", "_")+ "]")
             eae_gold_outputs.append(data[1])
             eae_events.append(data[2])
             eae_bids.append(i)
             # batch_inputs[i].append(data[0].split(' <|template')[0])
-            batch_inputs[i].append("EventExtract: " + data[0])
+            batch_inputs[i].append("EventExtract: " + data[0].split(' <|template')[0] + " [" +data[4].replace(":", "_")+ "]")
     
     # if there are triggers in this batch, predict argument roles
     if len(eae_inputs) > 0:

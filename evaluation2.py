@@ -52,6 +52,7 @@ class Metric:
                 self.tp += 1
                 dup_gold_list.remove(pred)
 
+
 def load_data(file_path, data_type):
     file = json.load(open(file_path))
     single_file = [i for i in file if '<|sep|>' not in i['reference_text']]

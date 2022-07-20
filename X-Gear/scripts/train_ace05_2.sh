@@ -7,5 +7,5 @@ CONFIG="./config/config_ace05_mT5copy-base_en2.json"
 # CONFIG="./config/config_ace05_mT5copy-base_ar.json"
 # CONFIG="./config/config_ace05_mT5copy-base_zh.json"
 
-python ./xgear/train.py -c $CONFIG
+python ./xgear/train_e2e.py -c $CONFIG
 

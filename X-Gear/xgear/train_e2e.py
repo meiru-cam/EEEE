@@ -7,6 +7,9 @@ from model import GenerativeModel
 from data import GenDataset
 from utils import Summarizer, compute_f1
 from argparse import ArgumentParser, Namespace
+import re
+from compare_mt.rouge.rouge_scorer import RougeScorer
+all_scorer = RougeScorer(['rouge1', 'rouge2', 'rougeLsum'], use_stemmer=True)
 
 # configuration
 parser = ArgumentParser()
@@ -90,6 +93,19 @@ if "argument:roletype" in config.output_style:
 # tokenizer.add_tokens(sep_tokens+special_tokens)
     
 # load data
+# TODO: contrastive ranking
+# stage1: extract triggers ------ input: TriggerExtract: content + [event_type] || output: <triggerword> triggerword
+# stage2: extract triggers ------ input: EventExtract: content + <triggerword> triggerword output: <role> arg <role> arg
+# 
+# the positives: reference text
+# the negatives: generated candidates
+# TODO: ranking the generated candidates by all_scorer(ref_e, gen_e)
+# TODO: contrastive: a new pre-trained model to encode generated event & the reference event
+# TODO: ranking loss L
+# TODO: train the ranking odel and get the final output
+
+# TODO: natural language prompt -> event type description
+
 train_set = GenDataset(tokenizer, sep_tokens, config.max_length, config.train_finetune_file, config.max_output_length)
 dev_set = GenDataset(tokenizer, sep_tokens, config.max_length, config.dev_finetune_file, config.max_output_length)
 test_set = GenDataset(tokenizer, sep_tokens, config.max_length, config.test_finetune_file, config.max_output_length)
@@ -114,6 +130,22 @@ schedule = get_linear_schedule_with_warmup(optimizer,
                                            num_warmup_steps=train_batch_num*config.warmup_epoch,
                                            num_training_steps=train_batch_num*config.max_epoch)
 
+def get_score(pred_arg_num, gold_arg_num, match_arg_id, match_arg_cls):
+    scores = {
+        'arg_id': compute_f1(pred_arg_num, gold_arg_num, match_arg_id),
+        'arg_cls': compute_f1(pred_arg_num, gold_arg_num, match_arg_cls)
+    }
+
+    # print scores
+    print("||||||||||||||||||||||||||||||||||-")
+    print('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+        scores['arg_id'][0] * 100.0, match_arg_id, pred_arg_num, 
+        scores['arg_id'][1] * 100.0, match_arg_id, gold_arg_num, scores['arg_id'][2] * 100.0))
+    print('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+        scores['arg_cls'][0] * 100.0, match_arg_cls, pred_arg_num, 
+        scores['arg_cls'][1] * 100.0, match_arg_cls, gold_arg_num, scores['arg_cls'][2] * 100.0))
+    print("||||||||||||||||||||||||||||||||||-")
+    return scores
 
 # start training
 logger.info("Start training ...")
@@ -123,6 +155,7 @@ best_dev_scores = {
     'arg_id': (0.0, 0.0, 0.0),
     'arg_cls': (0.0, 0.0, 0.0)
 }
+
 for epoch in range(1, config.max_epoch+1):
     logger.info(log_path)
     logger.info(f"Epoch {epoch}")
@@ -135,7 +168,6 @@ for epoch in range(1, config.max_epoch+1):
                                                  shuffle=True, drop_last=False, collate_fn=train_set.collate_fn)):
         
         # forard model
-        #print(batch) # GenBatch(input_text=[], enc_idxs=[], enc_segs=None, dec_idxs=[], dec_attn=[], lbl_idxs=[])
         loss = model(batch)
 
         # record loss
@@ -152,7 +184,6 @@ for epoch in range(1, config.max_epoch+1):
             optimizer.step()
             schedule.step()
             optimizer.zero_grad()
-            
     progress.close()
 
     # eval dev set
@@ -162,18 +193,54 @@ for epoch in range(1, config.max_epoch+1):
     write_output = []
     dev_gold_arg_num, dev_pred_arg_num, dev_match_arg_id, dev_match_arg_cls = 0, 0, 0, 0
     
+    # Two stage inference
+    # input loaded is "TriggerExtract: content", expected output is <|triggerword|> triggerword
+    # target loaded is "<role> arg <role> arg"
+
     for batch_idx, batch in enumerate(DataLoader(dev_set, batch_size=config.eval_batch_size, 
                                                  shuffle=False, collate_fn=dev_set.collate_fn)):
         progress.update(1)
+        # first stage: extract triggers, use the batch input directly
         if not isinstance(config.gpu_device, int) and len(config.gpu_device)>1:
             pred_text = model.module.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
         else:
             pred_text = model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
+        # second stage: create the input_text for event extraction
+        eae_inputs = []
+        for idx_t, trig_text in enumerate(batch.input_text):
+            trig_text=trig_text.replace("TriggerExtract", "EventExtract") # replace the prefix
+            # remove the event_type at the end of the trig_text
+            et = re.search('\[[^ />][^>]*\]', trig_text)
+            trig_text = trig_text[:et.start()] + pred_text[idx_t] + " " + et.group()
+            # trig_text=trig_text.replace(et, "")
+            # trig_text += " "
+            # append the triggerword to the end
+            # trig_text += pred_text[idx_t]
+            eae_inputs.append(trig_text)
+        eae_inputs = model.tokenizer(eae_inputs, return_tensors='pt', padding=True, max_length=config.max_length+2)
+        enc_idxs = eae_inputs['input_ids']
+        enc_idxs = enc_idxs.cuda()
+        enc_attn = eae_inputs['attention_mask'].cuda()
+        
+        if config.beam_size == 1:
+            model.model._cache_input_ids = enc_idxs
+        else:
+            expanded_return_idx = (
+                torch.arange(enc_idxs.shape[0]).view(-1, 1).repeat(1, config.beam_size).view(-1).to(enc_idxs.device)
+            )
+            input_ids = enc_idxs.index_select(0, expanded_return_idx)
+            model.model._cache_input_ids = input_ids
+        
+        with torch.no_grad():
+            # outputs= model.model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
+            outputs = model.model.generate(input_ids=enc_idxs, attention_mask=enc_attn,
+                num_beams=config.beam_size, max_length=config.max_output_length,
+                forced_bos_token_id=None)
+        eae_pred_outputs = [tokenizer.decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=True) for output in outputs]
+        
         gold_text = batch.target_text
         input_text = batch.input_text
-        for i_text, g_text, p_text, info in zip(input_text, gold_text, pred_text, batch.infos):
-            if g_text.startswith("<|trigger"):
-                continue
+        for i_text, g_text, p_text, info in zip(input_text, gold_text, eae_pred_outputs, batch.infos):
             if config.model_name.split("copy+")[-1] == 't5-base':
                 p_text = p_text.replace(" |", " <|")
                 if p_text and p_text[0] != "<":
@@ -203,21 +270,7 @@ for epoch in range(1, config.max_epoch+1):
             })
     progress.close()
     
-    dev_scores = {
-        'arg_id': compute_f1(dev_pred_arg_num, dev_gold_arg_num, dev_match_arg_id),
-        'arg_cls': compute_f1(dev_pred_arg_num, dev_gold_arg_num, dev_match_arg_cls)
-    }
-
-    # print scores
-    print("||||||||||||||||||||||||||||||||||-")
-    print('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
-        dev_scores['arg_id'][0] * 100.0, dev_match_arg_id, dev_pred_arg_num, 
-        dev_scores['arg_id'][1] * 100.0, dev_match_arg_id, dev_gold_arg_num, dev_scores['arg_id'][2] * 100.0))
-    print('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
-        dev_scores['arg_cls'][0] * 100.0, dev_match_arg_cls, dev_pred_arg_num, 
-        dev_scores['arg_cls'][1] * 100.0, dev_match_arg_cls, dev_gold_arg_num, dev_scores['arg_cls'][2] * 100.0))
-    print("||||||||||||||||||||||||||||||||||-")
-    
+    dev_scores = get_score(dev_pred_arg_num, dev_gold_arg_num, dev_match_arg_id, dev_match_arg_cls)
     # check best dev model
     if dev_scores['arg_cls'][2] >= best_dev_scores['arg_cls'][2]:
         best_dev_flag = True
@@ -241,16 +294,48 @@ for epoch in range(1, config.max_epoch+1):
         test_gold_arg_num, test_pred_arg_num, test_match_arg_id, test_match_arg_cls = 0, 0, 0, 0
         for batch_idx, batch in enumerate(DataLoader(test_set, batch_size=config.eval_batch_size, 
                                                      shuffle=False, collate_fn=test_set.collate_fn)):
-            progress.update(1)
-            if not isinstance(config.gpu_device, int) and len(config.gpu_device) > 1:
+            # first stage: extract triggers, use the batch input directly
+            if not isinstance(config.gpu_device, int) and len(config.gpu_device)>1:
                 pred_text = model.module.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
             else:
                 pred_text = model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
+            # second stage: create the input_text for event extraction
+            eae_inputs = []
+            for idx_t, trig_text in enumerate(batch.input_text):
+                trig_text=trig_text.replace("TriggerExtract", "EventExtract") # replace the prefix
+                # remove the event_type at the end of the trig_text
+                et = re.search('\[[^ />][^>]*\]', trig_text)
+                trig_text = trig_text[:et.start()] + pred_text[idx_t] + " " + et.group()
+                # trig_text=trig_text.replace(et, "")
+                # trig_text += " "
+                # append the triggerword to the end
+                # trig_text += pred_text[idx_t]
+                eae_inputs.append(trig_text)
+
+            eae_inputs = model.tokenizer(eae_inputs, return_tensors='pt', padding=True, max_length=config.max_length+2)
+            enc_idxs = eae_inputs['input_ids']
+            enc_idxs = enc_idxs.cuda()
+            enc_attn = eae_inputs['attention_mask'].cuda()
+            
+            if config.beam_size == 1:
+                model.model._cache_input_ids = enc_idxs
+            else:
+                expanded_return_idx = (
+                    torch.arange(enc_idxs.shape[0]).view(-1, 1).repeat(1, config.beam_size).view(-1).to(enc_idxs.device)
+                )
+                input_ids = enc_idxs.index_select(0, expanded_return_idx)
+                model.model._cache_input_ids = input_ids
+            
+            with torch.no_grad():
+                # outputs= model.model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
+                outputs = model.model.generate(input_ids=enc_idxs, attention_mask=enc_attn,
+                    num_beams=config.beam_size, max_length=config.max_output_length,
+                    forced_bos_token_id=None)
+            eae_pred_outputs = [tokenizer.decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=True) for output in outputs]
+            
             gold_text = batch.target_text
             input_text = batch.input_text
-            for i_text, g_text, p_text, info in zip(input_text, gold_text, pred_text, batch.infos):
-                if g_text.startswith("<|trigger"):
-                    continue
+            for i_text, g_text, p_text, info in zip(input_text, gold_text, eae_pred_outputs, batch.infos):
                 if config.model_name.split("copy+")[-1] == 't5-base':
                     p_text = p_text.replace(" |", " <|")
                     if p_text and p_text[0] != "<":
@@ -280,21 +365,7 @@ for epoch in range(1, config.max_epoch+1):
                 })
         progress.close()
         
-        test_scores = {
-            'arg_id': compute_f1(test_pred_arg_num, test_gold_arg_num, test_match_arg_id),
-            'arg_cls': compute_f1(test_pred_arg_num, test_gold_arg_num, test_match_arg_cls)
-        }
-        
-        # print scores
-        print("||||||||||||||||||||||||||||||||||-")
-        print('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
-            test_scores['arg_id'][0] * 100.0, test_match_arg_id, test_pred_arg_num, 
-            test_scores['arg_id'][1] * 100.0, test_match_arg_id, test_gold_arg_num, test_scores['arg_id'][2] * 100.0))
-        print('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
-            test_scores['arg_cls'][0] * 100.0, test_match_arg_cls, test_pred_arg_num, 
-            test_scores['arg_cls'][1] * 100.0, test_match_arg_cls, test_gold_arg_num, test_scores['arg_cls'][2] * 100.0))
-        print("||||||||||||||||||||||||||||||||||-")
-        
+        test_scores = get_score(test_pred_arg_num, test_gold_arg_num, test_match_arg_id, test_match_arg_cls)
         # save test result
         with open(test_prediction_path, 'w') as fp:
             json.dump(write_output, fp, indent=4)

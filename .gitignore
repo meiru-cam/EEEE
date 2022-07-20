@@ -7,3 +7,8 @@ generated/
 intermediate_dev_results_template_aw.json
 processed_data/
 trained_model/
+X-Gear/result/
+X-Gear/predictions/
+X-Gear/finetuned_data/*
+X-Gear/ace05rank/
+X-Gear/cache_eval/
